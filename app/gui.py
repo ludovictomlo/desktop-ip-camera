@@ -154,16 +154,10 @@ class MainWindow(QMainWindow):
         self._status_motion.setStyleSheet(
             "color: #ff4444; font-weight: bold; font-size: 13px;"
         )
-        self._recording_indicator.setVisible(True)
 
     def _on_motion_ended_ui(self):
         self._status_motion.setText("  ○ No Motion")
         self._status_motion.setStyleSheet("color: #888; font-size: 13px;")
-        # Recording indicator hides after post-record
-        QTimer.singleShot(
-            int(self.config["recording"]["post_record_seconds"] * 1000),
-            lambda: self._recording_indicator.setVisible(False),
-        )
         # Refresh recordings list
         self._refresh_recordings()
 
@@ -187,13 +181,6 @@ class MainWindow(QMainWindow):
             "background-color: #1a1a2e; color: #aaa; font-size: 14px; border-radius: 8px;"
         )
         left_panel.addWidget(self._video_label, stretch=1)
-
-        # Recording indicator overlay label
-        self._recording_indicator = QLabel("⏺ REC")
-        self._recording_indicator.setStyleSheet(
-            "color: red; font-weight: bold; font-size: 18px; background: transparent;"
-        )
-        self._recording_indicator.setVisible(False)
 
         # Controls row
         controls = QHBoxLayout()
@@ -576,12 +563,10 @@ class MainWindow(QMainWindow):
             self._btn_manual_record.setText("Stop Recording")
             self._btn_manual_record.setStyleSheet("background-color: #cc3333; color: white;")
             self._recorder.start_recording()
-            self._recording_indicator.setVisible(True)
         else:
             self._btn_manual_record.setText("Manual Record")
             self._btn_manual_record.setStyleSheet("")
             self._recorder.force_stop()
-            self._recording_indicator.setVisible(False)
             self._refresh_recordings()
 
     def _browse_folder(self):
