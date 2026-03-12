@@ -1,0 +1,24 @@
+{
+    "camera": {
+        "ip": "192.168.1.100",
+        "username": "admin",
+        "password": "your_password",
+        "rtsp_port": 554,
+        "stream_path": "/stream1"
+    },
+    "recording": {
+        "output_folder": "recordings",
+        "max_storage_mb": 5000,
+        "segment_duration_seconds": 60,
+        "pre_record_seconds": 5,
+        "post_record_seconds": 10,
+        "video_format": "mp4",
+        "fps": 15
+    },
+    "detection": {
+        "enabled": true,
+        "sensitivity": 25,
+        "min_area": 500,
+        "cooldown_seconds": 3
+    }
+}
