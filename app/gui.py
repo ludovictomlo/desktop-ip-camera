@@ -52,6 +52,7 @@ from app.detection import MotionDetector
 from app.recorder import RecordingManager
 from app.storage import StorageManager
 from app.config import load_config, save_config
+from app.zone_editor import ZoneEditorWidget
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ class MainWindow(QMainWindow):
         # State
         self._show_detection_overlay = True
         self._is_connected = False
+        self._frame_counter = 0  # For skipping detection frames
 
     # ── Initialization ──────────────────────────────────────────────
 
@@ -114,12 +116,17 @@ class MainWindow(QMainWindow):
             sensitivity=det_cfg["sensitivity"],
             min_area=det_cfg["min_area"],
             cooldown_seconds=det_cfg["cooldown_seconds"],
+            detection_scale=0.5,
         )
         self._detector.enabled = det_cfg["enabled"]
         self._detector.set_callbacks(
             on_motion_start=self._on_motion_start,
             on_motion_end=self._on_motion_end,
         )
+        # Load saved detection zones
+        zones = det_cfg.get("zones", [])
+        if zones:
+            self._detector.set_zones(zones)
 
     def _init_recorder(self):
         rec_cfg = self.config["recording"]
@@ -214,13 +221,14 @@ class MainWindow(QMainWindow):
         left_panel.addLayout(controls)
         main_layout.addLayout(left_panel, stretch=3)
 
-        # RIGHT: Tabs for Settings / Recordings
+        # RIGHT: Tabs for Settings / Recordings / Detection Zones
         right_panel = QTabWidget()
         right_panel.setMinimumWidth(340)
         right_panel.setMaximumWidth(420)
 
         right_panel.addTab(self._build_settings_tab(), "Settings")
         right_panel.addTab(self._build_recordings_tab(), "Recordings")
+        right_panel.addTab(self._build_zones_tab(), "Zones")
 
         main_layout.addWidget(right_panel, stretch=1)
 
@@ -306,7 +314,8 @@ class MainWindow(QMainWindow):
         rec_form.addRow("Folder:", folder_row)
 
         self._input_max_storage = QSpinBox()
-        self._input_max_storage.setRange(100, 1000000)
+        self._input_max_storage.setRange(1, 1000000)
+        self._input_max_storage.setSingleStep(500)
         self._input_max_storage.setValue(int(self.config["recording"]["max_storage_mb"]))
         self._input_max_storage.setSuffix(" MB")
         rec_form.addRow("Max Storage:", self._input_max_storage)
@@ -413,6 +422,161 @@ class MainWindow(QMainWindow):
 
         return tab
 
+    def _build_zones_tab(self) -> QWidget:
+        """Build the Detection Zones editor tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        # Zone editor widget (interactive canvas)
+        self._zone_editor = ZoneEditorWidget()
+        self._zone_editor.zones_changed.connect(self._on_zones_changed)
+        layout.addWidget(self._zone_editor, stretch=1)
+
+        # Toolbar buttons
+        tool_row1 = QHBoxLayout()
+
+        btn_grab = QPushButton("Grab Frame")
+        btn_grab.setToolTip("Capture current camera frame as background")
+        btn_grab.clicked.connect(self._zone_grab_frame)
+        tool_row1.addWidget(btn_grab)
+
+        self._btn_add_zone = QPushButton("Add Zone")
+        self._btn_add_zone.setToolTip("Start drawing a new detection zone")
+        self._btn_add_zone.clicked.connect(self._zone_start_drawing)
+        tool_row1.addWidget(self._btn_add_zone)
+
+        self._btn_finish_zone = QPushButton("Finish")
+        self._btn_finish_zone.setToolTip("Close the current polygon")
+        self._btn_finish_zone.clicked.connect(self._zone_finish)
+        self._btn_finish_zone.setEnabled(False)
+        tool_row1.addWidget(self._btn_finish_zone)
+
+        layout.addLayout(tool_row1)
+
+        tool_row2 = QHBoxLayout()
+
+        btn_toggle = QPushButton("Toggle")
+        btn_toggle.setToolTip("Enable/disable selected zone")
+        btn_toggle.clicked.connect(self._zone_toggle)
+        tool_row2.addWidget(btn_toggle)
+
+        btn_del = QPushButton("Delete")
+        btn_del.setToolTip("Delete selected zone")
+        btn_del.clicked.connect(self._zone_delete)
+        tool_row2.addWidget(btn_del)
+
+        btn_clear = QPushButton("Clear All")
+        btn_clear.setToolTip("Remove all zones")
+        btn_clear.clicked.connect(self._zone_clear)
+        tool_row2.addWidget(btn_clear)
+
+        layout.addLayout(tool_row2)
+
+        # Zone info label
+        self._zone_info_label = QLabel("No zones defined. Full frame is monitored.")
+        self._zone_info_label.setStyleSheet("color: #888; font-size: 11px;")
+        self._zone_info_label.setWordWrap(True)
+        layout.addWidget(self._zone_info_label)
+
+        # Apply / Save buttons
+        zone_btn_row = QHBoxLayout()
+        btn_apply_zones = QPushButton("Apply Zones")
+        btn_apply_zones.clicked.connect(self._zone_apply)
+        zone_btn_row.addWidget(btn_apply_zones)
+
+        btn_save_zones = QPushButton("Save Zones")
+        btn_save_zones.clicked.connect(self._zone_save)
+        zone_btn_row.addWidget(btn_save_zones)
+
+        layout.addLayout(zone_btn_row)
+
+        # Load saved zones into editor
+        saved_zones = self.config["detection"].get("zones", [])
+        if saved_zones:
+            self._zone_editor.set_zones(saved_zones)
+            self._update_zone_info()
+
+        return tab
+
+    # ── Zone editor actions ─────────────────────────────────────────
+
+    def _zone_grab_frame(self):
+        """Grab the current camera frame for the zone editor background."""
+        frame = self._camera.get_frame()
+        if frame is not None:
+            self._zone_editor.set_image_from_frame(frame)
+            self.statusBar().showMessage("Frame captured for zone editor", 2000)
+        else:
+            QMessageBox.information(
+                self, "No Frame",
+                "Connect to the camera first to grab a frame."
+            )
+
+    def _zone_start_drawing(self):
+        self._zone_editor.start_drawing()
+        self._btn_add_zone.setEnabled(False)
+        self._btn_finish_zone.setEnabled(True)
+
+    def _zone_finish(self):
+        self._zone_editor.finish_zone()
+        self._btn_add_zone.setEnabled(True)
+        self._btn_finish_zone.setEnabled(False)
+
+    def _zone_toggle(self):
+        self._zone_editor.toggle_selected()
+        self._update_zone_info()
+
+    def _zone_delete(self):
+        self._zone_editor.delete_selected()
+        self._update_zone_info()
+
+    def _zone_clear(self):
+        reply = QMessageBox.question(
+            self, "Clear Zones",
+            "Remove all detection zones?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._zone_editor.clear_all()
+            self._update_zone_info()
+
+    def _on_zones_changed(self, zones):
+        """Called when zones are modified in the editor."""
+        self._btn_add_zone.setEnabled(True)
+        self._btn_finish_zone.setEnabled(False)
+        self._update_zone_info()
+
+    def _update_zone_info(self):
+        zones = self._zone_editor.get_zones()
+        if not zones:
+            self._zone_info_label.setText(
+                "No zones defined. Full frame is monitored."
+            )
+        else:
+            active = sum(1 for z in zones if z.get("enabled", True))
+            self._zone_info_label.setText(
+                f"{len(zones)} zone(s) defined, {active} active.\n"
+                "Click a zone to select it. Only active zones are used for detection."
+            )
+
+    def _zone_apply(self):
+        """Apply current zones to the motion detector."""
+        zones = self._zone_editor.get_zones()
+        self._detector.set_zones(zones)
+        self.config["detection"]["zones"] = zones
+        self.statusBar().showMessage(
+            f"Detection zones applied ({len(zones)} zones)", 3000
+        )
+
+    def _zone_save(self):
+        """Save current zones to config.json."""
+        zones = self._zone_editor.get_zones()
+        self._detector.set_zones(zones)
+        self.config["detection"]["zones"] = zones
+        save_config(self.config)
+        self.statusBar().showMessage("Detection zones saved to config.json!", 3000)
+
     def _build_status_bar(self):
         status = self.statusBar()
 
@@ -479,7 +643,7 @@ class MainWindow(QMainWindow):
                 self._recorder.update_resolution(w, h)
 
             # Start frame timer (~30 FPS UI update)
-            self._frame_timer.start(33)
+            self._frame_timer.start(66)  # ~15 FPS for lower CPU usage
 
             # Start storage manager
             self._storage.start()
@@ -577,7 +741,7 @@ class MainWindow(QMainWindow):
             self._input_folder.setText(folder)
 
     def _apply_settings(self):
-        """Apply current UI settings to the running components."""
+        """Apply current UI settings to the running components and sync config."""
         # Detection
         self._detector.update_sensitivity(self._input_sensitivity.value())
         self._detector.update_min_area(self._input_min_area.value())
@@ -599,22 +763,16 @@ class MainWindow(QMainWindow):
         self._storage.recordings_folder = self._recorder.output_folder
         os.makedirs(self._recorder.output_folder, exist_ok=True)
 
-        self.statusBar().showMessage("Settings applied!", 3000)
-        logger.info("Settings applied")
-
-    def _save_settings(self):
-        """Save current UI settings to config.json."""
+        # Sync all values back to self.config so save_settings is always current
         self.config["camera"]["ip"] = self._input_ip.text().strip()
         self.config["camera"]["rtsp_port"] = self._input_port.value()
         self.config["camera"]["username"] = self._input_user.text().strip()
         self.config["camera"]["password"] = self._input_pass.text()
         self.config["camera"]["stream_path"] = self._input_stream.currentText()
-
         self.config["detection"]["sensitivity"] = self._input_sensitivity.value()
         self.config["detection"]["min_area"] = self._input_min_area.value()
         self.config["detection"]["cooldown_seconds"] = self._input_cooldown.value()
         self.config["detection"]["enabled"] = self._detector.enabled
-
         self.config["recording"]["output_folder"] = self._input_folder.text().strip()
         self.config["recording"]["max_storage_mb"] = self._input_max_storage.value()
         self.config["recording"]["segment_duration_seconds"] = self._input_segment.value()
@@ -622,6 +780,13 @@ class MainWindow(QMainWindow):
         self.config["recording"]["post_record_seconds"] = self._input_post_rec.value()
         self.config["recording"]["fps"] = self._input_fps.value()
 
+        self.statusBar().showMessage("Settings applied!", 3000)
+        logger.info("Settings applied")
+
+    def _save_settings(self):
+        """Save current UI settings to config.json."""
+        # Apply first so self.config is in sync with UI
+        self._apply_settings()
         save_config(self.config)
         self.statusBar().showMessage("Settings saved to config.json!", 3000)
 
@@ -697,8 +862,11 @@ class MainWindow(QMainWindow):
         if frame is None:
             return
 
-        # Feed to motion detector
-        self._detector.process_frame(frame)
+        self._frame_counter += 1
+
+        # Run detection every other frame to save CPU
+        if self._frame_counter % 2 == 0:
+            self._detector.process_frame(frame)
 
         # Feed to recorder (pre-buffer or active recording)
         self._recorder.feed_frame(frame)
@@ -731,7 +899,7 @@ class MainWindow(QMainWindow):
         scaled = pixmap.scaled(
             self._video_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.TransformationMode.FastTransformation,
         )
         self._video_label.setPixmap(scaled)
 

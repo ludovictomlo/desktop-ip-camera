@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
         "sensitivity": 25,
         "min_area": 500,
         "cooldown_seconds": 3,
+        "zones": [],
     },
 }
 
