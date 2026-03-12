@@ -461,14 +461,22 @@ class MainWindow(QMainWindow):
         self._camera = CameraStream(self._cam_config)
         self._camera.start()
 
-        # Wait a moment for connection
+        # Poll for connection with retries instead of a single fixed delay
         self._btn_connect.setText("Connecting...")
         self._btn_connect.setEnabled(False)
-        QTimer.singleShot(2000, self._check_connection)
+        self._connect_attempts = 0
+        self._connect_max_attempts = 15  # check once per second for 15s
+        self._connect_poll_timer = QTimer()
+        self._connect_poll_timer.timeout.connect(self._check_connection)
+        self._connect_poll_timer.start(1000)
 
     def _check_connection(self):
-        self._btn_connect.setEnabled(True)
+        self._connect_attempts += 1
+
         if self._camera.connected:
+            # Success — stop polling and finalize
+            self._connect_poll_timer.stop()
+            self._btn_connect.setEnabled(True)
             self._is_connected = True
             self._btn_connect.setText("Disconnect")
             self._status_connection.setText(
@@ -489,7 +497,21 @@ class MainWindow(QMainWindow):
             # Start storage manager
             self._storage.start()
             self._refresh_recordings()
-        else:
+            return
+
+        # Still waiting — update status with attempt count
+        remaining = self._connect_max_attempts - self._connect_attempts
+        self._status_connection.setText(
+            f"Connecting to {self._cam_config.ip}... ({remaining}s)"
+        )
+        self._status_connection.setStyleSheet(
+            "color: #ffaa00; font-size: 12px;"
+        )
+
+        if self._connect_attempts >= self._connect_max_attempts:
+            # Timed out — give up
+            self._connect_poll_timer.stop()
+            self._btn_connect.setEnabled(True)
             self._btn_connect.setText("Connect")
             self._status_connection.setText("Connection failed")
             self._status_connection.setStyleSheet(
@@ -508,6 +530,8 @@ class MainWindow(QMainWindow):
             self._camera.stop()
 
     def _disconnect(self):
+        if hasattr(self, '_connect_poll_timer') and self._connect_poll_timer.isActive():
+            self._connect_poll_timer.stop()
         self._frame_timer.stop()
         self._recorder.shutdown()
         self._camera.stop()
@@ -763,6 +787,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up on window close."""
+        if hasattr(self, '_connect_poll_timer') and self._connect_poll_timer.isActive():
+            self._connect_poll_timer.stop()
         self._frame_timer.stop()
         self._stats_timer.stop()
         self._recorder.shutdown()
