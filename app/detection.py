@@ -293,11 +293,22 @@ class MotionDetector:
             self._last_motion_time = now
 
             if not self._motion_active:
+                # Fresh motion start
                 self._motion_active = True
+                self._last_triggered_set = set(triggered_names)
                 zone_info = ', '.join(triggered_names) if triggered_names else 'full frame'
                 logger.info("Motion detected in: %s", zone_info)
                 if self._on_motion_start:
                     self._on_motion_start(triggered_names)
+            else:
+                # Already active — check if the set of triggered zones changed
+                current_set = set(triggered_names)
+                if current_set and current_set != getattr(self, '_last_triggered_set', set()):
+                    self._last_triggered_set = current_set
+                    zone_info = ', '.join(triggered_names)
+                    logger.info("Motion zones changed to: %s", zone_info)
+                    if self._on_motion_start:
+                        self._on_motion_start(triggered_names)
 
             if self._on_motion_frame:
                 self._on_motion_frame(frame, self._motion_regions)

@@ -66,8 +66,8 @@ class RecordingManager:
         self.total_recordings: int = 0
         self.current_recording_duration: float = 0
 
-        # Zone label for current recording
-        self._zone_label: str = ""
+        # Accumulated zone labels for current recording session
+        self._zone_labels: set[str] = set()
 
         # Ensure output folder exists
         os.makedirs(self.output_folder, exist_ok=True)
@@ -101,13 +101,21 @@ class RecordingManager:
         ----------
         zone_label : str
             Optional label derived from triggered zone names.
-            Included in the recording filename for identification.
+            Zone names are accumulated across the recording session
+            and all included in the final filename.
         """
         with self._lock:
             # Cancel any pending post-record stop
             if self._post_record_timer:
                 self._post_record_timer.cancel()
                 self._post_record_timer = None
+
+            # Parse comma-separated zone names and add to the set
+            if zone_label:
+                for name in zone_label.split(', '):
+                    name = name.strip()
+                    if name:
+                        self._zone_labels.add(name)
 
             if self._recording:
                 # Already recording, check if we need a new segment
@@ -118,7 +126,6 @@ class RecordingManager:
                 return
 
             logger.info("Starting recording...")
-            self._zone_label = zone_label
             self._start_new_segment()
 
             # Write pre-buffer frames
@@ -171,18 +178,18 @@ class RecordingManager:
             self._finalize_segment()
         self._recording = False
         self._current_file = None
+        self._zone_labels.clear()
         logger.info("Recording stopped")
 
     def _start_new_segment(self):
-        """Create a new video file for recording."""
+        """Create a new video file for recording.
+
+        Initially creates a temporary name; the final name with all
+        accumulated zone labels is applied when the segment is finalized.
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Build filename: motion_<timestamp>[_<zone_label>].<format>
-        if self._zone_label:
-            # Sanitise the label for safe filenames
-            safe_label = self._sanitise_filename(self._zone_label)
-            filename = f"motion_{timestamp}_{safe_label}.{self.video_format}"
-        else:
-            filename = f"motion_{timestamp}.{self.video_format}"
+        # Use a temporary name; zone labels may still be accumulating
+        filename = f"motion_{timestamp}.{self.video_format}"
         filepath = os.path.join(self.output_folder, filename)
 
         # Choose codec based on format
@@ -227,10 +234,30 @@ class RecordingManager:
             self._start_new_segment()
 
     def _finalize_segment(self):
-        """Close the current video segment."""
+        """Close the current video segment and rename with accumulated zone labels."""
         if self._writer:
             self._writer.release()
             self._writer = None
+
+            old_path = self._current_file
+            new_path = old_path
+
+            # Rename to include zone labels now that we know all of them
+            if self._zone_labels and old_path and os.path.exists(old_path):
+                folder = os.path.dirname(old_path)
+                base = os.path.splitext(os.path.basename(old_path))[0]
+                ext = os.path.splitext(old_path)[1]
+                sorted_labels = sorted(self._zone_labels)
+                safe_label = self._sanitise_filename(', '.join(sorted_labels))
+                new_name = f"{base}_{safe_label}{ext}"
+                new_path = os.path.join(folder, new_name)
+                try:
+                    os.rename(old_path, new_path)
+                    self._current_file = new_path
+                    logger.info("Segment renamed to: %s", new_name)
+                except OSError as e:
+                    logger.warning("Could not rename segment: %s", e)
+
             logger.info(
                 "Segment finalized: %s (%d frames, %.1fs)",
                 self._current_file,
