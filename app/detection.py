@@ -67,6 +67,7 @@ class MotionDetector:
 
         # Stats
         self._motion_regions: list = []
+        self._triggered_zone_names: list[str] = []  # names of zones with motion
 
         # Cached morphological kernel (avoid recreating every frame)
         self._kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -98,6 +99,11 @@ class MotionDetector:
     def motion_regions(self) -> list:
         """List of bounding rects (x, y, w, h) of detected motion."""
         return self._motion_regions
+
+    @property
+    def triggered_zone_names(self) -> list[str]:
+        """Names of zones where motion was last detected."""
+        return self._triggered_zone_names
 
     def set_callbacks(
         self,
@@ -174,6 +180,16 @@ class MotionDetector:
             self._zone_mask_full_cache = self._build_zone_mask(width, height)
         return self._zone_mask_full_cache
 
+    def _build_single_zone_mask(self, zone: dict, width: int, height: int) -> np.ndarray:
+        """Build a binary mask for a single zone at the given resolution."""
+        mask = np.zeros((height, width), dtype=np.uint8)
+        pts = np.array(
+            [(int(p[0] * width), int(p[1] * height)) for p in zone["points"]],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(mask, [pts], 255)
+        return mask
+
     def process_frame(self, frame: np.ndarray) -> bool:
         """
         Analyze a frame for motion.
@@ -182,10 +198,14 @@ class MotionDetector:
         to reduce CPU usage. Detected regions are mapped back to full
         resolution for overlay drawing.
 
+        Also determines *which* zones triggered motion so the recorder
+        can include zone names in filenames.
+
         Returns True if motion is detected in this frame.
         """
         if not self._enabled:
             self._motion_regions = []
+            self._triggered_zone_names = []
             return False
 
         now = time.time()
@@ -212,10 +232,38 @@ class MotionDetector:
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, self._kernel)
         fg_mask = cv2.dilate(fg_mask, self._kernel, iterations=2)
 
-        # Apply zone mask (if any zones are defined)
-        zone_mask = self._get_zone_mask(small_w, small_h)
-        if zone_mask is not None:
-            fg_mask = cv2.bitwise_and(fg_mask, zone_mask)
+        # Determine which zones triggered and build combined mask
+        active_zones = [
+            z for z in self._zones
+            if z.get("enabled", True) and len(z.get("points", [])) >= 3
+        ]
+
+        triggered_names: list[str] = []
+        if active_zones:
+            # Apply combined zone mask
+            zone_mask = self._get_zone_mask(small_w, small_h)
+            if zone_mask is not None:
+                masked_fg = cv2.bitwise_and(fg_mask, zone_mask)
+            else:
+                masked_fg = fg_mask
+
+            # Check each zone individually for trigger reporting
+            for zone in active_zones:
+                zmask = self._build_single_zone_mask(zone, small_w, small_h)
+                zone_fg = cv2.bitwise_and(fg_mask, zmask)
+                zone_contours, _ = cv2.findContours(
+                    zone_fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                min_area_scaled = self.min_area * (scale * scale)
+                for c in zone_contours:
+                    if cv2.contourArea(c) >= min_area_scaled:
+                        triggered_names.append(zone.get("name", "Unknown"))
+                        break
+
+            fg_mask = masked_fg
+        # else: no zones defined — full frame is monitored
+
+        self._triggered_zone_names = triggered_names
 
         # Find contours
         contours, _ = cv2.findContours(
@@ -246,9 +294,10 @@ class MotionDetector:
 
             if not self._motion_active:
                 self._motion_active = True
-                logger.info("Motion detected!")
+                zone_info = ', '.join(triggered_names) if triggered_names else 'full frame'
+                logger.info("Motion detected in: %s", zone_info)
                 if self._on_motion_start:
-                    self._on_motion_start()
+                    self._on_motion_start(triggered_names)
 
             if self._on_motion_frame:
                 self._on_motion_frame(frame, self._motion_regions)
@@ -284,13 +333,22 @@ class MotionDetector:
                 cv2.fillPoly(overlay, [pts], (0, 200, 255))
             cv2.addWeighted(overlay, 0.12, display, 0.88, 0, display)
 
-            # Zone outlines
+            # Zone outlines + labels
             for zone in active_zones:
                 pts = np.array(
                     [(int(p[0] * w), int(p[1] * h)) for p in zone["points"]],
                     dtype=np.int32,
                 )
                 cv2.polylines(display, [pts], True, (0, 200, 255), 2)
+
+                # Zone name label at centroid
+                cx = int(sum(p[0] for p in zone["points"]) / len(zone["points"]) * w)
+                cy = int(sum(p[1] for p in zone["points"]) / len(zone["points"]) * h)
+                name = zone.get("name", "Zone")
+                cv2.putText(
+                    display, name, (cx - 30, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1,
+                )
 
         # Draw motion bounding boxes
         for x, y, cw, ch in self._motion_regions:

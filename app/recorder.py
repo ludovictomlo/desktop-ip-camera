@@ -66,6 +66,9 @@ class RecordingManager:
         self.total_recordings: int = 0
         self.current_recording_duration: float = 0
 
+        # Zone label for current recording
+        self._zone_label: str = ""
+
         # Ensure output folder exists
         os.makedirs(self.output_folder, exist_ok=True)
 
@@ -91,8 +94,15 @@ class RecordingManager:
             else:
                 self._pre_buffer.append(frame.copy())
 
-    def start_recording(self):
-        """Start recording (called when motion is detected)."""
+    def start_recording(self, zone_label: str = ""):
+        """Start recording (called when motion is detected).
+
+        Parameters
+        ----------
+        zone_label : str
+            Optional label derived from triggered zone names.
+            Included in the recording filename for identification.
+        """
         with self._lock:
             # Cancel any pending post-record stop
             if self._post_record_timer:
@@ -108,6 +118,7 @@ class RecordingManager:
                 return
 
             logger.info("Starting recording...")
+            self._zone_label = zone_label
             self._start_new_segment()
 
             # Write pre-buffer frames
@@ -165,7 +176,13 @@ class RecordingManager:
     def _start_new_segment(self):
         """Create a new video file for recording."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"motion_{timestamp}.{self.video_format}"
+        # Build filename: motion_<timestamp>[_<zone_label>].<format>
+        if self._zone_label:
+            # Sanitise the label for safe filenames
+            safe_label = self._sanitise_filename(self._zone_label)
+            filename = f"motion_{timestamp}_{safe_label}.{self.video_format}"
+        else:
+            filename = f"motion_{timestamp}.{self.video_format}"
         filepath = os.path.join(self.output_folder, filename)
 
         # Choose codec based on format
@@ -231,3 +248,11 @@ class RecordingManager:
         """Clean shutdown of the recording manager."""
         self.force_stop()
         logger.info("Recording manager shut down")
+
+    @staticmethod
+    def _sanitise_filename(label: str) -> str:
+        """Convert a zone label to a safe filename fragment."""
+        import re
+        # Replace spaces/special chars with underscores, strip leading/trailing
+        safe = re.sub(r'[^\w\-]+', '_', label).strip('_')
+        return safe[:60] if safe else "zone"

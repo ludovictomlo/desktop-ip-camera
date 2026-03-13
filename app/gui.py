@@ -12,7 +12,6 @@ Features:
 import sys
 import os
 import cv2
-import numpy as np
 import logging
 import subprocess
 from datetime import datetime
@@ -45,14 +44,15 @@ from PyQt6.QtWidgets import (
     QFrame,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
-from PyQt6.QtGui import QImage, QPixmap, QFont, QIcon, QAction
+from PyQt6.QtGui import QFont, QIcon, QAction
 
 from app.camera import CameraStream, CameraConfig
 from app.detection import MotionDetector
 from app.recorder import RecordingManager
 from app.storage import StorageManager
 from app.config import load_config, save_config
-from app.zone_editor import ZoneEditorWidget
+from app.video_widget import ZoomableVideoWidget
+from app.zone_dialog import ZoneEditorDialog
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class MainWindow(QMainWindow):
     """Main application window."""
 
     # Signal emitted from background threads to update UI
-    motion_started = pyqtSignal()
+    motion_started = pyqtSignal(list)   # list of triggered zone names
     motion_ended = pyqtSignal()
 
     def __init__(self, config: dict):
@@ -148,16 +148,21 @@ class MainWindow(QMainWindow):
 
     # ── Motion callbacks (called from background thread) ────────────
 
-    def _on_motion_start(self):
-        self._recorder.start_recording()
-        self.motion_started.emit()
+    def _on_motion_start(self, zone_names: list[str]):
+        zone_label = ', '.join(zone_names) if zone_names else ''
+        self._recorder.start_recording(zone_label=zone_label)
+        self.motion_started.emit(zone_names)
 
     def _on_motion_end(self):
         self._recorder.stop_recording()
         self.motion_ended.emit()
 
-    def _on_motion_started_ui(self):
-        self._status_motion.setText("  ● MOTION")
+    def _on_motion_started_ui(self, zone_names: list[str]):
+        if zone_names:
+            label = ', '.join(zone_names)
+            self._status_motion.setText(f"  ● MOTION: {label}")
+        else:
+            self._status_motion.setText("  ● MOTION")
         self._status_motion.setStyleSheet(
             "color: #ff4444; font-weight: bold; font-size: 13px;"
         )
@@ -180,14 +185,9 @@ class MainWindow(QMainWindow):
         # LEFT: Live feed + controls
         left_panel = QVBoxLayout()
 
-        # Camera feed
-        self._video_label = QLabel("Camera feed will appear here.\nClick 'Connect' to start.")
-        self._video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._video_label.setMinimumSize(640, 360)
-        self._video_label.setStyleSheet(
-            "background-color: #1a1a2e; color: #aaa; font-size: 14px; border-radius: 8px;"
-        )
-        left_panel.addWidget(self._video_label, stretch=1)
+        # Camera feed (zoomable)
+        self._video_widget = ZoomableVideoWidget()
+        left_panel.addWidget(self._video_widget, stretch=1)
 
         # Controls row
         controls = QHBoxLayout()
@@ -423,61 +423,26 @@ class MainWindow(QMainWindow):
         return tab
 
     def _build_zones_tab(self) -> QWidget:
-        """Build the Detection Zones editor tab."""
+        """Build the Detection Zones tab with info and dialog launcher."""
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # Zone editor widget (interactive canvas)
-        self._zone_editor = ZoneEditorWidget()
-        self._zone_editor.zones_changed.connect(self._on_zones_changed)
-        layout.addWidget(self._zone_editor, stretch=1)
-
-        # Toolbar buttons
-        tool_row1 = QHBoxLayout()
-
-        btn_grab = QPushButton("Grab Frame")
-        btn_grab.setToolTip("Capture current camera frame as background")
-        btn_grab.clicked.connect(self._zone_grab_frame)
-        tool_row1.addWidget(btn_grab)
-
-        self._btn_add_zone = QPushButton("Add Zone")
-        self._btn_add_zone.setToolTip("Start drawing a new detection zone")
-        self._btn_add_zone.clicked.connect(self._zone_start_drawing)
-        tool_row1.addWidget(self._btn_add_zone)
-
-        self._btn_finish_zone = QPushButton("Finish")
-        self._btn_finish_zone.setToolTip("Close the current polygon")
-        self._btn_finish_zone.clicked.connect(self._zone_finish)
-        self._btn_finish_zone.setEnabled(False)
-        tool_row1.addWidget(self._btn_finish_zone)
-
-        layout.addLayout(tool_row1)
-
-        tool_row2 = QHBoxLayout()
-
-        btn_toggle = QPushButton("Toggle")
-        btn_toggle.setToolTip("Enable/disable selected zone")
-        btn_toggle.clicked.connect(self._zone_toggle)
-        tool_row2.addWidget(btn_toggle)
-
-        btn_del = QPushButton("Delete")
-        btn_del.setToolTip("Delete selected zone")
-        btn_del.clicked.connect(self._zone_delete)
-        tool_row2.addWidget(btn_del)
-
-        btn_clear = QPushButton("Clear All")
-        btn_clear.setToolTip("Remove all zones")
-        btn_clear.clicked.connect(self._zone_clear)
-        tool_row2.addWidget(btn_clear)
-
-        layout.addLayout(tool_row2)
-
-        # Zone info label
-        self._zone_info_label = QLabel("No zones defined. Full frame is monitored.")
-        self._zone_info_label.setStyleSheet("color: #888; font-size: 11px;")
+        # Zone info
+        self._zone_info_label = QLabel("")
+        self._zone_info_label.setStyleSheet("color: #cdd6f4; font-size: 11px;")
         self._zone_info_label.setWordWrap(True)
         layout.addWidget(self._zone_info_label)
+        self._update_zone_info()
+
+        # Open editor dialog button
+        btn_open_editor = QPushButton("Open Zone Editor")
+        btn_open_editor.setMinimumHeight(40)
+        btn_open_editor.setToolTip(
+            "Open a large popup window for drawing and editing detection zones"
+        )
+        btn_open_editor.clicked.connect(self._open_zone_editor_dialog)
+        layout.addWidget(btn_open_editor)
 
         # Apply / Save buttons
         zone_btn_row = QHBoxLayout()
@@ -490,90 +455,60 @@ class MainWindow(QMainWindow):
         zone_btn_row.addWidget(btn_save_zones)
 
         layout.addLayout(zone_btn_row)
-
-        # Load saved zones into editor
-        saved_zones = self.config["detection"].get("zones", [])
-        if saved_zones:
-            self._zone_editor.set_zones(saved_zones)
-            self._update_zone_info()
+        layout.addStretch()
 
         return tab
 
     # ── Zone editor actions ─────────────────────────────────────────
 
-    def _zone_grab_frame(self):
-        """Grab the current camera frame for the zone editor background."""
+    def _open_zone_editor_dialog(self):
+        """Open the zone editor in a large popup dialog."""
         frame = self._camera.get_frame()
-        if frame is not None:
-            self._zone_editor.set_image_from_frame(frame)
-            self.statusBar().showMessage("Frame captured for zone editor", 2000)
-        else:
-            QMessageBox.information(
-                self, "No Frame",
-                "Connect to the camera first to grab a frame."
-            )
+        current_zones = self.config["detection"].get("zones", [])
 
-    def _zone_start_drawing(self):
-        self._zone_editor.start_drawing()
-        self._btn_add_zone.setEnabled(False)
-        self._btn_finish_zone.setEnabled(True)
-
-    def _zone_finish(self):
-        self._zone_editor.finish_zone()
-        self._btn_add_zone.setEnabled(True)
-        self._btn_finish_zone.setEnabled(False)
-
-    def _zone_toggle(self):
-        self._zone_editor.toggle_selected()
-        self._update_zone_info()
-
-    def _zone_delete(self):
-        self._zone_editor.delete_selected()
-        self._update_zone_info()
-
-    def _zone_clear(self):
-        reply = QMessageBox.question(
-            self, "Clear Zones",
-            "Remove all detection zones?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        dialog = ZoneEditorDialog(
+            parent=self, frame=frame, zones=current_zones,
         )
-        if reply == QMessageBox.StandardButton.Yes:
-            self._zone_editor.clear_all()
+        if dialog.exec() == ZoneEditorDialog.DialogCode.Accepted:
+            zones = dialog.get_zones()
+            self.config["detection"]["zones"] = zones
+            self._detector.set_zones(zones)
             self._update_zone_info()
-
-    def _on_zones_changed(self, zones):
-        """Called when zones are modified in the editor."""
-        self._btn_add_zone.setEnabled(True)
-        self._btn_finish_zone.setEnabled(False)
-        self._update_zone_info()
+            self.statusBar().showMessage(
+                f"Zones updated ({len(zones)} zones)", 3000
+            )
 
     def _update_zone_info(self):
-        zones = self._zone_editor.get_zones()
+        zones = self.config["detection"].get("zones", [])
         if not zones:
             self._zone_info_label.setText(
-                "No zones defined. Full frame is monitored."
+                "No detection zones defined.\n"
+                "Full frame will be monitored for motion.\n\n"
+                "Click 'Open Zone Editor' to draw polygon zones\n"
+                "on a camera snapshot."
             )
         else:
+            parts = []
+            for i, z in enumerate(zones):
+                status = "ON" if z.get("enabled", True) else "OFF"
+                parts.append(f"  {i+1}. {z.get('name', f'Zone {i+1}')} ({status})")
             active = sum(1 for z in zones if z.get("enabled", True))
             self._zone_info_label.setText(
-                f"{len(zones)} zone(s) defined, {active} active.\n"
-                "Click a zone to select it. Only active zones are used for detection."
+                f"{len(zones)} zone(s) defined, {active} active:\n" +
+                "\n".join(parts) +
+                "\n\nClick 'Open Zone Editor' to modify."
             )
 
     def _zone_apply(self):
         """Apply current zones to the motion detector."""
-        zones = self._zone_editor.get_zones()
+        zones = self.config["detection"].get("zones", [])
         self._detector.set_zones(zones)
-        self.config["detection"]["zones"] = zones
         self.statusBar().showMessage(
             f"Detection zones applied ({len(zones)} zones)", 3000
         )
 
     def _zone_save(self):
         """Save current zones to config.json."""
-        zones = self._zone_editor.get_zones()
-        self._detector.set_zones(zones)
-        self.config["detection"]["zones"] = zones
         save_config(self.config)
         self.statusBar().showMessage("Detection zones saved to config.json!", 3000)
 
@@ -693,8 +628,8 @@ class MainWindow(QMainWindow):
         self._status_connection.setText("Disconnected")
         self._status_connection.setStyleSheet("color: #888; font-size: 12px;")
 
-        self._video_label.setPixmap(QPixmap())
-        self._video_label.setText("Disconnected. Click 'Connect' to start.")
+        self._video_widget.clear()
+        self._video_widget.set_placeholder("Disconnected. Click 'Connect' to start.")
 
     def _toggle_detection(self):
         self._detector.enabled = not self._detector.enabled
@@ -889,19 +824,8 @@ class MainWindow(QMainWindow):
         self._display_frame(display)
 
     def _display_frame(self, frame):
-        """Convert an OpenCV frame to QPixmap and set on label."""
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        bytes_per_line = ch * w
-        q_img = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-
-        pixmap = QPixmap.fromImage(q_img)
-        scaled = pixmap.scaled(
-            self._video_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
-        )
-        self._video_label.setPixmap(scaled)
+        """Send the frame to the zoomable video widget."""
+        self._video_widget.set_frame(frame)
 
     def _update_stats(self):
         """Update status bar statistics."""

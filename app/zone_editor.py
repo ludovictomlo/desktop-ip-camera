@@ -261,7 +261,7 @@ class ZoneEditorWidget(QWidget):
         if not enabled:
             label += " (off)"
         painter.drawText(
-            int(lpt.x()) - 40, int(lpt.y()) - 8, 80, 16,
+            int(lpt.x()) - 80, int(lpt.y()) - 10, 160, 20,
             Qt.AlignmentFlag.AlignCenter, label,
         )
 
