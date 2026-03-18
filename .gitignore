@@ -23,3 +23,9 @@ env/
 recordings/
 config.json
 *.log
+
+# PyInstaller
+*.spec.bak
+dist/
+build/
+__pycache__/

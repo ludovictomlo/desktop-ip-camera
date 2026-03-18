@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv/Scripts/python.exe -c \"import PyQt6; import cv2; import numpy; print\\(''All packages OK''\\)\")",
+      "Bash(venv/Scripts/pip install:*)",
+      "Bash(venv/Scripts/pyinstaller.exe tapo_viewer.spec --clean)"
+    ]
+  }
+}
