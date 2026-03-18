@@ -1,13 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
+import os
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 block_cipher = None
 
+# Explicitly include python312.dll to avoid PyInstaller 6.x path-embedding bug
+python_dll_name = f'python{sys.version_info.major}{sys.version_info.minor}.dll'
+python_dll_path = os.path.join(os.path.dirname(sys.executable), python_dll_name)
+extra_binaries = collect_dynamic_libs('cv2')
+if os.path.exists(python_dll_path):
+    extra_binaries.append((python_dll_path, '.'))
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=collect_dynamic_libs('cv2'),
+    binaries=extra_binaries,
     datas=[
         ('config_default.json', '.'),
         ('app', 'app'),
@@ -32,30 +40,24 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# One-file build: everything packed into a single self-extracting exe
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name='TapoViewer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,  # No console window
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='TapoViewer',
 )
