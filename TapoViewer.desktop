@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=TapoViewer
+Comment=TP-Link Tapo Camera Viewer with motion detection
+Exec=/media/shared/Work/Projects/tplink-camera-app/launch.sh
+Path=/media/shared/Work/Projects/tplink-camera-app
+Icon=camera-video
+Terminal=false
+Type=Application
+Categories=Video;Utility;
